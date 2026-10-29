@@ -68,6 +68,14 @@ def multiple_segments(f, values):
 
 
 class GeometryTests(unittest.TestCase):
+    def test_parsed_analysis_matches_public_analysis_without_mutating_inputs(self):
+        f = fixture()
+        trial, machine = core.read(f["trial"]), core.read(f["machine"])
+        before = (core.fingerprint(trial), core.fingerprint(machine))
+        self.assertEqual(core.analyze(f["trial"], [f["machine"]]),
+                         core.analyze_parsed(f["trial"], trial, [machine]))
+        self.assertEqual(before, (core.fingerprint(trial), core.fingerprint(machine)))
+
     def test_consensus_alignment_outside_original_opening_for_masked_strips(self):
         for aligned in (0, 1):
             for replaces in (0, 1):
@@ -293,6 +301,52 @@ class GeometryTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_stage_cache_is_content_keyed_and_cleared_on_success_and_failure(self):
+        f = fixture()
+        cache = helper.StageData()
+        self.assertIs(cache.items(f["trial"]), cache.items(f["trial"]))
+        changed = replace(f["trial"], "Weight=1;", "Weight=0.5;")
+        self.assertNotEqual(cache.fingerprint(f["trial"]), cache.fingerprint(changed))
+        original = helper.run_stage
+        seen = []
+
+        def capture(args):
+            seen.append(helper._stage_data)
+            if args:
+                raise ValueError("stage failure")
+
+        helper.run_stage = capture
+        try:
+            helper.main([])
+            self.assertIsNone(helper._stage_data)
+            with self.assertRaises(ValueError):
+                helper.main(["fail"])
+            self.assertIsNone(helper._stage_data)
+            self.assertIsNot(seen[0], seen[1])
+        finally:
+            helper.run_stage = original
+
+    def test_single_start_analyzes_once_and_report_preserves_curve_bytes(self):
+        f = fixture()
+        original = core.analyze_parsed
+        calls = []
+
+        def counted(*args):
+            calls.append(1)
+            return original(*args)
+
+        core.analyze_parsed = counted
+        try:
+            directory = self.prepare("run", f)
+            self.assertEqual(len(calls), 1)
+            analysis = helper.analyze_snapshot(directory)
+            report = helper.make_report(directory, analysis)
+            self.assertIn("bytes", analysis["curves"][0])
+            self.assertNotIn("bytes", report["curves"][0])
+            self.assertEqual(report, helper.load(directory + "/report.json"))
+        finally:
+            core.analyze_parsed = original
+
     def setUp(self):
         self.temp = os.path.realpath(tempfile.mkdtemp(prefix="jaw-python-"))
         self.output = os.path.join(self.temp, "bundle")

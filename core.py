@@ -330,9 +330,12 @@ def common_closure(segment_values, ci, li, machine, leaf, travel, strip, origina
 
 
 def analyze(trial_bytes, machine_bytes):
-    trial = read(trial_bytes)
+    return analyze_parsed(trial_bytes, read(trial_bytes), [read(data) for data in machine_bytes])
+
+
+def analyze_parsed(trial_bytes, trial, machines):
     beams = block(trial, "BeamList")
-    insist(0 < len(beams) <= 64 and len(machine_bytes) == len(beams), "one machine snapshot per beam required")
+    insist(0 < len(beams) <= 64 and len(machines) == len(beams), "one machine snapshot per beam required")
     result = {"trialName": string(trial, "Name"), "beamCount": len(beams), "segmentCount": 0,
               "changes": [], "observations": [], "curves": [], "profiles": [], "blockers": []}
     for bi, entry in enumerate(beams):
@@ -340,7 +343,7 @@ def analyze(trial_bytes, machine_bytes):
         beam = entry["children"]
         insist(string(beam, "SetBeamType") == "Step & Shoot MLC" and flag(beam, "UseMLC")
                and string(beam, "Modality") == "Photons", "only static photon Step & Shoot MLC supported")
-        machine = geometry(read(machine_bytes[bi]))
+        machine = geometry(machines[bi])
         insist(string(beam, "MachineNameAndVersion") == machine["name"] + ": " + machine["version"],
                "machine name/version mismatch")
         result["profiles"].append(machine)

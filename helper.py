@@ -11,6 +11,41 @@ import uuid
 import core
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+_stage_data = None
+
+
+class StageData(object):
+    def __init__(self):
+        self.parsed = {}
+        self.fingerprints = {}
+
+    def items(self, data):
+        if data not in self.parsed:
+            self.parsed[data] = core.read(data)
+        return self.parsed[data]
+
+    def fingerprint(self, data):
+        if data not in self.fingerprints:
+            self.fingerprints[data] = core.fingerprint(self.items(data))
+        return self.fingerprints[data]
+
+
+def read_items(file):
+    data = read_bytes(file)
+    return _stage_data.items(data) if _stage_data is not None else core.read(data)
+
+
+def file_fingerprint(file):
+    data = read_bytes(file)
+    return _stage_data.fingerprint(data) if _stage_data is not None else core.fingerprint(core.read(data))
+
+
+def analyze_snapshot(directory):
+    data = read_bytes(directory + "/current.txt")
+    trial = _stage_data.items(data) if _stage_data is not None else core.read(data)
+    machines = [read_items(directory + "/machine-%d.txt" % i)
+                for i in range(len(core.block(trial, "BeamList")))]
+    return core.analyze_parsed(data, trial, machines)
 
 
 def timestamp():
@@ -133,7 +168,7 @@ def idle(directory, prefix=""):
 
 
 def identity(directory, prefix=""):
-    trial = core.read(read_bytes(directory + "/" + prefix + "current.txt"))
+    trial = read_items(directory + "/" + prefix + "current.txt")
     plan = text(directory + "/" + prefix + "plan.txt")
     absolute = re.match(r"^/[A-Za-z0-9_./-]+$", plan)
     relative = re.match(r"^Institution_[0-9]+/Mount_[0-9]+/Patient_[0-9]+/Plan_[0-9]+$", plan)
@@ -143,11 +178,12 @@ def identity(directory, prefix=""):
     core.insist(load(ROOT + "/config.json")["researchOnly"] is True, "research-only configuration required")
     core.insist(name and not re.search(r'["\r\n\\]', name)
                 and all(ord(c) < 256 for c in name), "unsupported native Trial name")
-    return {"planPath": plan, "trialName": name, "trialFingerprint": core.fingerprint(trial)}
+    return {"planPath": plan, "trialName": name,
+            "trialFingerprint": file_fingerprint(directory + "/" + prefix + "current.txt")}
 
 
 def beams(directory, prefix=""):
-    return core.block(core.read(read_bytes(directory + "/" + prefix + "current.txt")), "BeamList")
+    return core.block(read_items(directory + "/" + prefix + "current.txt"), "BeamList")
 
 
 def machine_bytes(directory, prefix=""):
@@ -165,18 +201,21 @@ def compare_snapshot(before, after, prefix=""):
     idle(after, prefix)
     core.insist(identity(before) == identity(after, prefix), "plan/Trial changed since preview")
     for name in ("current", "all"):
-        core.insist(core.fingerprint(core.read(read_bytes(before + "/" + name + ".txt")))
-                    == core.fingerprint(core.read(read_bytes(after + "/" + prefix + name + ".txt"))),
+        core.insist(file_fingerprint(before + "/" + name + ".txt")
+                    == file_fingerprint(after + "/" + prefix + name + ".txt"),
                     "protected fields or Trial inventory changed since preview")
     a, b = machine_bytes(before), machine_bytes(after, prefix)
-    core.insist(len(a) == len(b) and all(core.fingerprint(core.read(x)) == core.fingerprint(core.read(y))
-                                      for x, y in zip(a, b)), "machine configuration changed")
+    core.insist(len(a) == len(b) and all(
+        (_stage_data.fingerprint(x) == _stage_data.fingerprint(y)) if _stage_data is not None
+        else core.fingerprint(core.read(x)) == core.fingerprint(core.read(y))
+        for x, y in zip(a, b)), "machine configuration changed")
 
 
-def make_report(directory):
-    result = core.analyze(read_bytes(directory + "/current.txt"), machine_bytes(directory))
-    for curve in result["curves"]:
-        del curve["bytes"]
+def make_report(directory, analysis=None):
+    analysis = analyze_snapshot(directory) if analysis is None else analysis
+    result = dict(analysis)
+    result["curves"] = [dict((key, value) for key, value in curve.items() if key != "bytes")
+                        for curve in analysis["curves"]]
     result.update(identity=identity(directory), researchOnly=True, exportReady=False)
     return result
 
@@ -243,8 +282,8 @@ def acknowledge(directory):
     core.insist(identity(directory) == identity(directory, "consent-"),
                 "plan/Trial changed during research warning")
     for name in ("current", "all"):
-        core.insist(core.fingerprint(core.read(read_bytes(directory + "/" + name + ".txt")))
-                    == core.fingerprint(core.read(read_bytes(directory + "/consent-" + name + ".txt"))),
+        core.insist(file_fingerprint(directory + "/" + name + ".txt")
+                    == file_fingerprint(directory + "/consent-" + name + ".txt"),
                     "protected fields or Trial inventory changed during research warning")
     save(directory + "/research-consent.json", {"identity": identity(directory), "at": timestamp()})
     atomic(directory + "/machine-stage.Script", machine_snapshot(directory) + command("analyze", directory)
@@ -259,7 +298,8 @@ def require_consent(directory):
 def inspected(directory):
     require_consent(directory)
     request = load(directory + "/request.json")
-    report = make_report(directory)
+    analysis = analyze_snapshot(directory)
+    report = make_report(directory, analysis)
     save(directory + "/report.json", report)
     write_exclusive(directory + "/report.txt", (summary(report) + "\n").encode("latin1"))
     if request["mode"] == "verify":
@@ -273,11 +313,11 @@ def inspected(directory):
         source = request["previous"]
         validate_dir(source)
         core.insist(not os.path.exists(source + "/mutation.claim"), "preview already claimed; do not replay")
-        compare_snapshot(source, directory)
+        if source != directory:
+            compare_snapshot(source, directory)
         core.insist(load(source + "/report.json") == report, "preview report differs")
         core.insist(not report["blockers"], "closure constraints block cleanup; see report.json")
-        result = core.analyze(read_bytes(directory + "/current.txt"), machine_bytes(directory))
-        for i, curve in enumerate(result["curves"]):
+        for i, curve in enumerate(analysis["curves"]):
             write_exclusive(directory + "/curve-%d.txt" % i, curve["bytes"])
         atomic(directory + "/authorize.Script", native_snapshot(directory, "live-")
                + machine_snapshot(directory, "live-") + command("claim", directory)
@@ -297,7 +337,7 @@ def inspected(directory):
 
 
 def guard(directory):
-    trial = core.read(read_bytes(directory + "/current.txt"))
+    trial = read_items(directory + "/current.txt")
     plan = identity(directory)
     conditions = []
 
@@ -312,7 +352,7 @@ def guard(directory):
 
     string("PlanInfo.PlanPath", plan["planPath"])
     string("TrialList.Current.Name", plan["trialName"])
-    numeric("TrialList.Count", len(core.read(read_bytes(directory + "/all.txt"))))
+    numeric("TrialList.Count", len(read_items(directory + "/all.txt")))
     entries = core.block(trial, "BeamList")
     numeric("TrialList.Current.BeamList.Count", len(entries))
     for field in ("Optimizing", "Resetting", "ComputingFinalDose"):
@@ -353,7 +393,8 @@ def claim(directory):
     validate_dir(source)
     core.insist(not os.path.exists(directory + "/mutation.claim")
                 and not os.path.exists(source + "/mutation.claim"), "already claimed; do not replay")
-    compare_snapshot(source, directory)
+    if source != directory:
+        compare_snapshot(source, directory)
     compare_snapshot(directory, directory, "live-")
     report = load(directory + "/report.json")
     core.insist(report == make_report(directory) == load(source + "/report.json"), "report changed")
@@ -383,10 +424,10 @@ def verify_snapshot(source, directory, prefix):
     core.insist(before_id["planPath"] == after_id["planPath"]
                 and before_id["trialName"] == after_id["trialName"], "plan/Trial identity changed")
     idle(directory, prefix)
-    core.verify_items(core.read(read_bytes(source + "/current.txt")),
-                      core.read(read_bytes(directory + "/" + prefix + "current.txt")), report["curves"])
-    core.verify_all(core.read(read_bytes(source + "/all.txt")),
-                    core.read(read_bytes(directory + "/" + prefix + "all.txt")), report["trialName"], report["curves"])
+    core.verify_items(read_items(source + "/current.txt"),
+                      read_items(directory + "/" + prefix + "current.txt"), report["curves"])
+    core.verify_all(read_items(source + "/all.txt"),
+                    read_items(directory + "/" + prefix + "all.txt"), report["trialName"], report["curves"])
     core.insist(text(directory + "/" + prefix + "dose.txt") == "0", "old dose is valid or state unknown")
     return report
 
@@ -422,6 +463,16 @@ def verify_previous(directory, source):
 
 
 def main(args):
+    global _stage_data
+    core.insist(_stage_data is None, "nested helper stage")
+    _stage_data = StageData()
+    try:
+        return run_stage(args)
+    finally:
+        _stage_data = None
+
+
+def run_stage(args):
     core.insist(len(args) == 2, "expected stage and argument")
     stage, argument = args
     if stage == "prepare":
