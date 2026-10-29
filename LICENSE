@@ -1,0 +1,36 @@
+CPCleaner Research-Only License 1.0
+
+Copyright (c) 2026 yxhbj. All rights reserved except as expressly granted below.
+
+Permission is granted, without a license fee, to individuals and organizations
+to download, make internal copies of, run, and internally modify this software
+solely for authorized non-clinical research and evaluation.
+
+This permission does not include:
+1. Clinical use, patient treatment decisions, treatment planning for patient
+   care, clinical quality assurance, or delivery to a treatment system.
+2. Redistribution, publication, sublicensing, sale, or external distribution
+   of the software, modified versions, or derivative works.
+3. Use outside non-clinical research and evaluation.
+
+Internal copies and modifications must retain this license, the copyright
+notice, and the research-only warnings. Modified versions must be identified
+as modified and must not be represented as approved by the copyright holder.
+Sharing the official repository URL or research findings that do not distribute
+the software is permitted. No trademark or third-party rights are granted.
+Permissions independently provided by applicable law or platform terms are
+not restricted by this license. Other uses require separate written permission
+from the copyright holder.
+
+Users are responsible for obtaining institutional authorization, protecting
+sensitive data, maintaining backups, and independently validating compatibility
+and results in an appropriate research environment. Passing checks or tests
+does not constitute clinical approval, dose equivalence, or a safety guarantee.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW,
+THE COPYRIGHT HOLDER AND CONTRIBUTORS SHALL NOT BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
+
+This is a restricted research license, not an open-source license.

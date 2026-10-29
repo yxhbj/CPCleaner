@@ -399,7 +399,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_package_has_no_javascript_and_all_native_checksums_match(self):
         self.assertEqual(sorted(self.manifest["files"]),
-                         sorted(["core.py", "helper.py", "config.json", "Failure.Script", "Start-CPCleaner.Script",
+                         sorted(["core.py", "helper.py", "LICENSE", "README.md", "config.json", "Failure.Script", "Start-CPCleaner.Script",
                                  "01-Check.Script", "02-Clean.Script", "03-Verify.Script", "HotScriptList.entries"]))
         for name, digest in self.manifest["files"].items():
             data = helper.read_bytes(os.path.join(self.output, name))

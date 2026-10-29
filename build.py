@@ -27,7 +27,7 @@ def build(output, install, python):
             stream.write(data)
         manifest["files"][name] = core.digest(data)
 
-    for name in ("core.py", "helper.py"):
+    for name in ("core.py", "helper.py", "LICENSE", "README.md"):
         with open(os.path.join(os.path.dirname(__file__), name), "rb") as stream:
             write(name, stream.read())
     write("config.json", json.dumps({"schemaVersion": 1, "researchOnly": True, "python": python}, indent=2) + "\n")
