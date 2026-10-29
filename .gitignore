@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+/build/
+/dist/
+/runs/
+*.zip
+*.Script
+/config.json
+/manifest.json
+/HotScriptList.entries
