@@ -212,7 +212,7 @@ class GeometryTests(unittest.TestCase):
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.mkdtemp(prefix="jaw-python-")
+        self.temp = os.path.realpath(tempfile.mkdtemp(prefix="jaw-python-"))
         self.output = os.path.join(self.temp, "bundle")
         self.manifest = build.build(self.output, "/var/tmp/jaw-python-test", "/usr/bin/python")
         self.old_root = helper.ROOT
