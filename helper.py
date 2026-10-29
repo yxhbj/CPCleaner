@@ -140,8 +140,9 @@ def identity(directory, prefix=""):
     core.insist((absolute or relative) and not any(part in (".", "..") for part in plan.split("/")),
                 "missing or unsupported plan path")
     name = core.string(trial, "Name")
-    core.insist(load(ROOT + "/config.json")["researchOnly"] is True
-                and re.match(r"^CPC_RESEARCH_[A-Za-z0-9_-]+$", name), "research-only: select a CPC_RESEARCH_ Trial")
+    core.insist(load(ROOT + "/config.json")["researchOnly"] is True, "research-only configuration required")
+    core.insist(name and not re.search(r'["\r\n\\]', name)
+                and all(ord(c) < 256 for c in name), "unsupported native Trial name")
     return {"planPath": plan, "trialName": name, "trialFingerprint": core.fingerprint(trial)}
 
 
@@ -185,9 +186,11 @@ def summary(report):
              "Unchanged active/boundary openings: " + str(len(report["observations"])),
              "Configuration/closure blockers: " + str(len(report["blockers"]))]
     for finding in report["changes"][:12]:
-        lines.append("Beam %d / Segment %d / Leaf pair %d: %s -> %s cm; %s" % (
+        lines.append("Beam %d / Segment %d / Leaf pair %d: %s -> %s cm; %s; %s" % (
             finding["beamIndex"] + 1, finding["segmentIndex"] + 1, finding["leafIndex"] + 1,
-            finding["before"], finding["after"], finding["classification"]))
+            finding["before"], finding["after"], finding["classification"], finding["closureStrategy"]))
+        if finding.get("alignmentFallback"):
+            lines.append("Alignment fallback: " + finding["alignmentFallback"])
     if report["blockers"]:
         lines.extend(report["blockers"][:3])
     return "\n".join(lines)
@@ -214,7 +217,7 @@ def prepare(mode):
     if mode == "run":
         source = directory
     save(directory + "/request.json", {"mode": mode, "previous": source, "createdAt": timestamp()})
-    for name in ("next", "result", "authorize", "guard", "import", "finished"):
+    for name in ("next", "result", "authorize", "guard", "import", "finished", "consent", "machine-stage"):
         atomic(directory + "/" + name + ".Script", notice("Jaw/MLC stage incomplete. No cleanup was authorized."))
     atomic(base + "/bridge.Script", native_snapshot(directory) + command("machines", directory)
            + execute(directory + "/next.Script"))
@@ -222,13 +225,39 @@ def prepare(mode):
 
 def machines(directory):
     idle(directory)
-    identity(directory)
+    plan = identity(directory)
     core.insist(1 <= len(beams(directory)) <= 64, "invalid beam count")
-    atomic(directory + "/next.Script", machine_snapshot(directory) + command("analyze", directory)
+    prompt = ("CPCleaner: RESEARCH ONLY. Not clinically approved.\nTrial: " + plan["trialName"] +
+              "\nThe entire current Trial will be inspected. Trial names are not restricted. "
+              "Use only an authorized research copy with a backup. Geometry changes invalidate old dose/evaluation; "
+              "dose recalculation, QA and reconfirmation are required. No automatic save or export. "
+              "Continue research inspection? Cleanup requires a separate confirmation.")
+    atomic(directory + "/consent.Script", native_snapshot(directory, "consent-")
+           + command("acknowledge", directory) + execute(directory + "/machine-stage.Script"))
+    atomic(directory + "/next.Script", "AskYesNoDefault = 0;\nAskYesNoPrompt = " + quote(prompt)
+           + ";\n" + execute(directory + "/consent.Script", "AskYesNo"))
+
+
+def acknowledge(directory):
+    idle(directory, "consent-")
+    core.insist(identity(directory) == identity(directory, "consent-"),
+                "plan/Trial changed during research warning")
+    for name in ("current", "all"):
+        core.insist(core.fingerprint(core.read(read_bytes(directory + "/" + name + ".txt")))
+                    == core.fingerprint(core.read(read_bytes(directory + "/consent-" + name + ".txt"))),
+                    "protected fields or Trial inventory changed during research warning")
+    save(directory + "/research-consent.json", {"identity": identity(directory), "at": timestamp()})
+    atomic(directory + "/machine-stage.Script", machine_snapshot(directory) + command("analyze", directory)
            + execute(directory + "/result.Script"))
 
 
+def require_consent(directory):
+    core.insist(load(directory + "/research-consent.json")["identity"] == identity(directory),
+                "research acknowledgement missing or changed")
+
+
 def inspected(directory):
+    require_consent(directory)
     request = load(directory + "/request.json")
     report = make_report(directory)
     save(directory + "/report.json", report)
@@ -317,6 +346,7 @@ def guard(directory):
 
 
 def claim(directory):
+    require_consent(directory)
     request = load(directory + "/request.json")
     core.insist(request["mode"] in ("run", "clean"), "not a cleanup request")
     source = request["previous"]
@@ -397,7 +427,8 @@ def main(args):
     if stage == "prepare":
         return prepare(argument)
     validate_dir(argument)
-    handler = {"machines": machines, "analyze": inspected, "claim": claim, "finish": finish}.get(stage)
+    handler = {"machines": machines, "acknowledge": acknowledge,
+               "analyze": inspected, "claim": claim, "finish": finish}.get(stage)
     core.insist(handler is not None, "unknown stage")
     handler(argument)
 
@@ -410,7 +441,7 @@ def failed(args, error):
         atomic(directory + "/failure.json", encoded({
             "error": str(error), "at": timestamp(),
             "reconciliationRequired": os.path.exists(directory + "/mutation.claim")}))
-        for name in ("next", "result", "authorize", "guard", "import", "finished"):
+        for name in ("next", "result", "authorize", "guard", "import", "finished", "consent", "machine-stage"):
             atomic(directory + "/" + name + ".Script", notice(message))
     elif os.path.isdir(display_dir()):
         atomic(display_dir() + "/bridge.Script", notice(message))

@@ -294,6 +294,41 @@ def leaf_values(cp):
     return values
 
 
+def closed_opening(pair, machine):
+    step = Decimal(str(machine["precision"]))
+    static = (Decimal(str(machine["minGap"])) / step).to_integral_value(rounding=ROUND_CEILING) * step
+    limit = max(static + Decimal("0.000001"),
+                Decimal(str(machine["minDynamicGap"])) + Decimal("0.0001"))
+    return sum((Decimal(str(v)) for v in pair), Decimal(0)) <= limit
+
+
+def masked_opening(pair, machine, leaf, travel, strip):
+    a, b = pair
+    step = machine["precision"]
+    v0, v1 = leaf["center"] - leaf["width"] / 2, leaf["center"] + leaf["width"] / 2
+    if (v1 + machine["tongue"] / 2 < -strip[0] - step
+            or v0 - machine["tongue"] / 2 > strip[1] + step):
+        return "behind-strip-jaw"
+    if not machine["replacesJaw"] and (
+            b + leaf["tip"] / 2 < -travel[0] - step or -a - leaf["tip"] / 2 > travel[1] + step):
+        return "behind-travel-jaw"
+    return None
+
+
+def common_closure(segment_values, ci, li, machine, leaf, travel, strip, original):
+    references = [values[2 * li:2 * li + 2] for i, values in enumerate(segment_values) if i != ci]
+    if not references or any(pair != references[0] or not closed_opening(pair, machine)
+                             for pair in references):
+        return None
+    target = references[0]
+    step = Decimal(str(machine["precision"]))
+    if any(Decimal(str(v)) % step != 0 for v in target):
+        return None
+    # The entire swept aperture, not only its two endpoints, must remain masked.
+    swept = [max(a, b) for a, b in zip(original, target)]
+    return target[:] if masked_opening(swept, machine, leaf, travel, strip) else None
+
+
 def analyze(trial_bytes, machine_bytes):
     trial = read(trial_bytes)
     beams = block(trial, "BeamList")
@@ -315,6 +350,9 @@ def analyze(trial_bytes, machine_bytes):
                "invalid segment count")
         result["segmentCount"] += len(segments)
         insist(result["segmentCount"] <= 10000, "segment limit exceeded")
+        segment_values = [leaf_values(segment["children"])["values"] for segment in segments]
+        insist(all(len(values) == 2 * len(machine["leaves"]) for values in segment_values),
+               "leaf coordinate count mismatch")
         static = None
         for ci, segment in enumerate(segments):
             insist(segment["key"] == "#" + str(ci) and segment["kind"] == "block", "nonconsecutive segments")
@@ -334,36 +372,42 @@ def analyze(trial_bytes, machine_bytes):
             changed = []
             for li, leaf in enumerate(machine["leaves"]):
                 a, b = values[2 * li:2 * li + 2]
-                step = machine["precision"]
-                closed_gap = float((Decimal(str(machine["minGap"])) / Decimal(str(step)))
-                                   .to_integral_value(rounding=ROUND_CEILING)) * step
-                # Pinnacle treats a gap <= MinDynamicLeafGap + 0.0001 cm as closed.
-                gap = Decimal(str(a)) + Decimal(str(b))
-                closed_limit = max(Decimal(str(closed_gap)) + Decimal("0.000001"),
-                                   Decimal(str(machine["minDynamicGap"])) + Decimal("0.0001"))
-                if gap <= closed_limit:
+                if closed_opening([a, b], machine):
                     continue
-                v0, v1 = leaf["center"] - leaf["width"] / 2, leaf["center"] + leaf["width"] / 2
-                behind_strip = (v1 + machine["tongue"] / 2 < -strip[0] - step
-                                or v0 - machine["tongue"] / 2 > strip[1] + step)
-                behind_travel = not machine["replacesJaw"] and (
-                    b + leaf["tip"] / 2 < -travel[0] - step or -a - leaf["tip"] / 2 > travel[1] + step)
+                classification = masked_opening([a, b], machine, leaf, travel, strip)
                 finding = {"beamIndex": bi, "segmentIndex": ci, "leafIndex": li,
                            "beamName": string(beam, "Name"), "before": [a, b]}
-                if not behind_strip and not behind_travel:
+                if not classification:
                     finding["classification"] = "active-or-boundary"
                     result["observations"].append(finding)
                     continue
-                finding["classification"] = "behind-strip-jaw" if behind_strip else "behind-travel-jaw"
+                finding["classification"] = classification
                 try:
                     after = minimum_opening(a, b, machine, leaf)
                 except ValueError as error:
                     result["blockers"].append(str(error))
                     continue
+                finding["closureStrategy"] = "original-midpoint"
+                target = common_closure(segment_values, ci, li, machine, leaf, travel, strip, [a, b])
+                if target is not None:
+                    after = target
+                    finding["closureStrategy"] = "other-cps-consensus"
                 values[2 * li:2 * li + 2] = after
                 finding["after"] = after
                 changed.append(finding)
             if changed:
+                aligned = [finding for finding in changed if finding["closureStrategy"] == "other-cps-consensus"]
+                if aligned:
+                    try:
+                        validate_positions(values, machine, travel)
+                    except ValueError as error:
+                        for finding in aligned:
+                            li = finding["leafIndex"]
+                            finding["after"] = minimum_opening(
+                                finding["before"][0], finding["before"][1], machine, machine["leaves"][li])
+                            finding["closureStrategy"] = "original-midpoint"
+                            finding["alignmentFallback"] = str(error)
+                            values[2 * li:2 * li + 2] = finding["after"]
                 try:
                     validate_positions(values, machine, travel)
                 except ValueError as error:

@@ -50,7 +50,89 @@ def replace(data, old, new):
     return core.native(body.replace(old, new))
 
 
+def multiple_segments(f, values):
+    source = f["trial"].decode("latin1")
+    beam = core.block(core.read(f["trial"]), "BeamList")[0]["children"]
+    cp_list = core.one(core.manager(beam), "ControlPointList", "block")
+    bodies = []
+    for points in values:
+        data = f["trial_text"](points)
+        trial = core.read(core.native(data))
+        cp = core.block(core.manager(core.block(trial, "BeamList")[0]["children"]),
+                        "ControlPointList")[0]
+        bodies.append(data[cp["start"]:cp["end"]])
+    body = source[:cp_list["start"]] + "{" + "".join(
+        "#%d=%s;" % (i, cp) for i, cp in enumerate(bodies)) + "}" + source[cp_list["end"]:]
+    body = body[:body.rfind("/* ")]
+    return core.native(body.replace("NumberOfControlPoints=1;", "NumberOfControlPoints=%d;" % len(values)))
+
+
 class GeometryTests(unittest.TestCase):
+    def test_consensus_alignment_outside_original_opening_for_masked_strips(self):
+        for aligned in (0, 1):
+            for replaces in (0, 1):
+                f = fixture(aligned=aligned, replaces=replaces)
+                reference = f["values"][:]
+                reference[:2] = [6, -6]
+                trial = multiple_segments(f, [f["values"], reference, reference])
+                result = core.analyze(trial, [f["machine"]])
+                self.assertEqual(len(result["changes"]), 1)
+                finding = result["changes"][0]
+                self.assertEqual(finding["after"], [6, -6])
+                self.assertEqual(finding["closureStrategy"], "other-cps-consensus")
+                self.assertEqual(result["blockers"], [])
+                self.assertEqual(result["curves"][0]["values"][2:], f["values"][2:])
+
+    def test_consensus_requires_all_other_cps_closed_identical_and_quantized(self):
+        f = fixture()
+        for pairs in (([6, -6], [7, -7]), ([6, -6], [0.2, 0.2]),
+                      ([6.001, -6.001], [6.001, -6.001])):
+            references = []
+            for pair in pairs:
+                values = f["values"][:]
+                values[:2] = pair
+                references.append(values)
+            result = core.analyze(multiple_segments(f, [f["values"]] + references), [f["machine"]])
+            finding = next(c for c in result["changes"] if c["segmentIndex"] == 0)
+            self.assertEqual(finding["after"], [0, 0])
+            self.assertEqual(finding["closureStrategy"], "original-midpoint")
+
+    def test_consensus_preserves_positive_reference_gap_and_already_closed_cps(self):
+        f = fixture(gap=0.02)
+        reference = f["values"][:]
+        reference[:2] = [6, -5.95]
+        result = core.analyze(multiple_segments(f, [f["values"], reference]), [f["machine"]])
+        self.assertEqual(len(result["changes"]), 1)
+        self.assertEqual(result["changes"][0]["after"], [6, -5.95])
+        self.assertEqual(core.analyze(multiple_segments(f, [reference, reference]),
+                                     [f["machine"]])["changes"], [])
+
+    def test_consensus_rejects_unmasked_sweep_between_travel_jaws(self):
+        f = fixture(positions={0: [0, 0], 3: [-3, 3.2]})
+        for reference_pair, expected in (([-4, 4], [-4, 4]), ([3, -3], [-3.1, 3.1]),
+                                         ([0, 0], [-3.1, 3.1])):
+            reference = f["values"][:]
+            reference[6:8] = reference_pair
+            result = core.analyze(multiple_segments(f, [f["values"], reference]), [f["machine"]])
+            finding = next(c for c in result["changes"] if c["segmentIndex"] == 0)
+            self.assertEqual(finding["after"], expected)
+
+    def test_consensus_constraint_failure_falls_back_without_moving_neighbors(self):
+        f = fixture()
+        reference = [6, -6] * 6
+        reference[6:8] = [1, 1]
+        machine = replace(f["machine"], "MaxOverallLeafDifference=20;", "MaxOverallLeafDifference=7;")
+        # The reference CP is legal, but mixing its leaf with this CP's other leaves is not.
+        original = f["values"][:]
+        original[2:4] = [-2, 2]
+        result = core.analyze(multiple_segments(f, [original, reference]), [machine])
+        finding = next(c for c in result["changes"] if c["segmentIndex"] == 0)
+        self.assertEqual(finding["after"], [0, 0])
+        self.assertEqual(finding["closureStrategy"], "original-midpoint")
+        self.assertIn("maximum bank difference", finding["alignmentFallback"])
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["curves"][0]["values"][2:], original[2:])
+
     def test_generic_counts_directions_replacement_and_display_sign(self):
         for count in (6, 40, 60, 80):
             for aligned in (0, 1):
@@ -256,6 +338,8 @@ class RuntimeTests(unittest.TestCase):
                          if n not in existing and len(n) == 32)
         self.snapshot(directory, f)
         self.run_stage("machines", directory)
+        self.snapshot(directory, f, "consent-")
+        self.run_stage("acknowledge", directory)
         self.run_stage("analyze", directory, analyze_ok)
         return directory
 
@@ -399,20 +483,49 @@ class RuntimeTests(unittest.TestCase):
         self.run_stage("claim", clean, False)
         self.assertTrue(helper.load(clean + "/failure.json")["reconciliationRequired"])
 
-    def test_busy_unknown_and_ordinary_clinical_trial_fail_closed(self):
+    def test_busy_and_unknown_still_fail_closed(self):
         f = fixture()
         check = self.prepare("check", f)
         with open(check + "/optimizing.txt", "wb") as stream:
             stream.write(b"UNKNOWN\n")
         self.run_stage("machines", check, False)
         self.assertIn("unknown", helper.text(check + "/next.Script"))
-        bad = dict(f, trial=replace(f["trial"], 'Name="CPC_RESEARCH_PYTEST"', 'Name="FinalPlan"'))
+    def test_arbitrary_trial_name_requires_default_no_research_consent(self):
+        f = fixture()
+        bad = dict(f, trial=replace(f["trial"], 'Name="CPC_RESEARCH_PYTEST"', 'Name="Experiment 1"'))
         self.run_stage("prepare", "check")
         directory = next(os.path.join(self.base, n) for n in os.listdir(self.base)
                          if len(n) == 32 and not os.path.exists(os.path.join(self.base, n, "current.txt")))
         self.snapshot(directory, bad)
-        self.run_stage("machines", directory, False)
-        self.assertIn("research-only", helper.text(directory + "/next.Script"))
+        self.run_stage("machines", directory)
+        warning = helper.text(directory + "/next.Script")
+        self.assertIn("AskYesNoDefault = 0", warning)
+        self.assertIn("RESEARCH ONLY", warning)
+        self.assertIn("Experiment 1", warning)
+        self.assertIn("IF.AskYesNo.THEN.Load", warning)
+        self.assertFalse(os.path.exists(directory + "/research-consent.json"))
+        self.assertFalse(os.path.exists(directory + "/report.json"))
+        self.assertNotIn("Machine.Save", warning)
+        self.run_stage("analyze", directory, False)
+        self.assertFalse(os.path.exists(directory + "/curve-0.txt"))
+
+    def test_research_consent_accepts_arbitrary_name_and_rejects_changes(self):
+        f = fixture()
+        named = dict(f, trial=replace(f["trial"], 'Name="CPC_RESEARCH_PYTEST"', 'Name="Experiment 1"'))
+        directory = self.prepare("run", named)
+        self.assertTrue(os.path.exists(directory + "/research-consent.json"))
+        self.assertIn("AskYesNoDefault = 0", helper.text(directory + "/result.Script"))
+        self.assertIn('STRINGEQUALTO.#"#Experiment 1"', helper.guard(directory))
+        for changed in (f, dict(named, trial=replace(named["trial"], "Weight=1;", "Weight=0.5;"))):
+            self.run_stage("prepare", "run")
+            directory = next(os.path.join(self.base, n) for n in os.listdir(self.base)
+                             if len(n) == 32 and not os.path.exists(os.path.join(self.base, n, "current.txt")))
+            self.snapshot(directory, named)
+            self.run_stage("machines", directory)
+            self.snapshot(directory, changed, "consent-")
+            self.run_stage("acknowledge", directory, False)
+            self.assertFalse(os.path.exists(directory + "/research-consent.json"))
+            self.assertNotIn("Machine.Save", helper.text(directory + "/machine-stage.Script"))
 
     def test_closure_blockers_allow_check_but_never_publish_import(self):
         f = fixture(overlap=0, positions={0: [0.2, 0.2], 1: [-0.1, 0.2], 2: [0.1, 0.1]})
