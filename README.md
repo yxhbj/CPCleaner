@@ -35,32 +35,81 @@
 - 固定 Jaw、附加 mMLC、无序/不连续叶条带及未知配置拒绝。
   已实现约束检查不等于穷尽所有机器可交付性要求。
 
-## 构建
+## 安装准备（不需要 root 或免密 SSH）
 
 目标运行环境：Pinnacle 原生脚本和 Solaris 系统 Python **2.7** 标准库。
 Python 2.7 已停止上游维护；本工具为既有隔离研究环境提供兼容，
 不是部署过时 Python 到联网系统的建议。构建和合成测试也可使用 Python 3。
 
-在源码目录执行；输出目录必须尚不存在：
+**构建只生成本地文件，不连接 Pinnacle、不上传文件、不登录任何账户。**
+运行也不需要 SSH、root 或管理员权限。文件进入目标机时，使用机构允许的方式，
+例如共享目录、移动介质或正常密码认证的文件传输；本工具不规定传输方式。
+若机构不允许用户自行安装或访问终端，请由获授权的管理员代为放置文件，
+不要绕过权限或为此开放 root 登录。
+
+首先确认：
+
+- Pinnacle **实际运行账户**可读写的 Solaris 绝对安装路径。
+  下文 `/home/ACCOUNT/CPCleaner` 仅为示例，必须替换为现场真实路径；
+  不是要求存在名为 `ACCOUNT` 的用户，也不要求使用某个固定账户。
+- 目标 Solaris 上已有 Python 的绝对路径；下文假设 `/usr/bin/python`，
+  请在目标机执行 `/usr/bin/python -V` 核实，而不是以 Windows 的 Python 版本代替。
+- 安装目录不是符号链接，父路径也不经过符号链接；helper 会拒绝非规范路径。
+  安装路径、解释器路径不得含空格或 shell 元字符。
+
+### 方式一：在 Solaris 普通账户下生成（推荐）
+
+将源码归档通过获准方式放到目标机并解压。打开获授权的终端，
+以 Pinnacle 实际运行账户操作，进入解压后的源码目录，执行：
+
+```sh
+umask 077
+/usr/bin/python -B build.py /home/ACCOUNT/CPCleaner /home/ACCOUNT/CPCleaner /usr/bin/python
+```
+
+替换示例路径后执行。输出安装目录必须尚不存在，且与源码目录不同。
+在该账户自己的可写目录创建文件不需要 root，也不需要从另一台电脑远程登录。
+安装完成即可进入下面的“独立启动”，无需再复制一次。
+
+### 方式二：在 Windows 生成，再自行传输
+
+Windows 需已有 Python。在解压后的源码目录打开 PowerShell，执行：
 
 ```powershell
-python -B .\build.py C:\Temp\CPCleaner /home/p3rtp/CPCleaner /usr/bin/python
+python -B .\build.py "$env:TEMP\CPCleaner-package" /home/ACCOUNT/CPCleaner /usr/bin/python
+```
+
+三个参数依次是：
+
+1. **Windows 本地输出目录**：示例为临时目录下的 `CPCleaner-package`，必须尚不存在。
+2. **目标 Solaris 实际安装目录**：只写入脚本，不会自动连接或创建远端目录。
+3. **目标 Solaris Python 路径**：只写入配置，不是在 Windows 上执行此路径。
+
+然后通过机构允许的方式将**完整输出目录的内容**原样放到第二个参数指定的位置，
+保留空 `runs/` 目录。文件应由 Pinnacle 实际运行账户拥有并可读写；
+请勿假定 Windows 文件权限会随传输正确保留。
+不要直接选择 Windows 输出中的启动脚本来控制目标机。
+
+两种方式都不需要 pip、npm 或依赖下载。源码归档不是可直接执行的安装包：
+必须先按实际安装路径构建，更换路径需重新构建。
+
+### 可选：合成测试（不是安装步骤）
+
+测试只使用人工构造的数据和本机临时文件，不连接或操作 Pinnacle。
+可在源码目录按所用系统运行；普通用户安装不要求执行此命令：
+
+```powershell
 python -B -m unittest discover -s .\tests -p test_jaw_mlc.py -v
 ```
 
-Solaris 上也可本地构建：
-
 ```sh
-/usr/bin/python -B build.py /home/p3rtp/CPCleaner /home/p3rtp/CPCleaner /usr/bin/python
+/usr/bin/python -B -m unittest discover -s tests -p test_jaw_mlc.py -v
 ```
-
-后两个参数为**实际安装目录**和已有 Python 的绝对路径，不允许空格或 shell 元字符。
-源码目录与输出目录必须不同；不要覆盖现有安装。
-无需 pip、npm 或依赖下载。源码归档不是可直接执行的安装包：先按实际路径构建。
 
 ## 安装和独立启动
 
-1. 将完整构建输出按二进制原样传输至构建时指定的 Solaris 安装目录，
+1. 若在 Windows 构建，将完整构建输出按二进制原样传输至构建时指定的 Solaris 安装目录；
+   在 Solaris 直接生成的安装不需要传输。
    保留 `core.py`、`helper.py`、许可、说明、配置、manifest、全部脚本和空 `runs/`。
    更换安装位置必须重新构建、重新验收。
 2. 限制目录与证据访问权限。Pinnacle 运行账户须能读取脚本和依赖、执行 Python、
@@ -68,12 +117,15 @@ Solaris 上也可本地构建：
 3. 不要用文本编辑器改写生成的 `.Script`：末尾含二进制原生校验和，
    不可改变编码、换行或通过文本模式传输。
 4. 用户任选一种方式运行 **`Start-CPCleaner.Script`**：
-   - **Scripting 窗口**直接选择安装目录中的启动脚本；
+   - **Scripting 窗口**直接选择目标机安装目录中的启动脚本
+     （例如替换真实路径后的 `/home/ACCOUNT/CPCleaner/Start-CPCleaner.Script`）；
    - **HotScriptList** 按机构现行维护流程注册 `HotScriptList.entries` 中的单条条目。
      它是条目片段，不是完整原生列表；保留原列表其他条目及正确校验和，
      不要直接追加到原文件校验和之后。
 
-构建器不会修改全局 HotScriptList。启动脚本不是单文件可执行工具：
+构建器不会修改全局 HotScriptList。若没有修改全局列表的权限，直接使用 Scripting 窗口，
+或由管理员按机构流程注册，不需要取得 root 权限来运行本工具。
+启动脚本不是单文件可执行工具：
 **只拷走启动脚本而不安装完整依赖无法运行。**
 
 ## 一次启动的行为
