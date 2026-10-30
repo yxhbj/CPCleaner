@@ -300,6 +300,49 @@ class GeometryTests(unittest.TestCase):
             self.assertIn("moving jaws or angles", str(caught.exception))
 
 
+@unittest.skipUnless(os.name == "posix" and getattr(os, "getuid", lambda: 0)() != 0,
+                     "shell installer requires a non-root POSIX account")
+class InstallerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = os.path.realpath(tempfile.mkdtemp(prefix="cpcleaner-install-"))
+        self.python = os.path.join(self.temp, "python")
+        os.symlink(sys.executable, self.python)
+        self.script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "Install-CPCleaner.sh")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp)
+
+    def install(self, target):
+        process = subprocess.Popen(["/bin/sh", self.script, target, self.python],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout.decode("ascii"), stderr.decode("ascii")
+
+    def test_normal_account_installs_verified_bundle_without_accessing_plan(self):
+        target = os.path.join(self.temp, "installed")
+        code, stdout, stderr = self.install(target)
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("Scripting entry: " + target + "/Start-CPCleaner.Script", stdout)
+        self.assertEqual(os.listdir(os.path.join(target, "runs")), [])
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
+        manifest = helper.load(os.path.join(target, "manifest.json"))
+        for name, digest in manifest["files"].items():
+            data = helper.read_bytes(os.path.join(target, name))
+            self.assertEqual(core.digest(data), digest)
+            if name.endswith(".Script"):
+                self.assertEqual(core.checksum(data), 0)
+
+    def test_existing_installation_is_never_overwritten(self):
+        target = os.path.join(self.temp, "existing")
+        os.mkdir(target)
+        code, stdout, stderr = self.install(target)
+        self.assertNotEqual(code, 0)
+        self.assertIn("already exists", stderr)
+        self.assertNotIn("installation verified", stdout)
+        self.assertEqual(os.listdir(target), [])
+
+
 class RuntimeTests(unittest.TestCase):
     def test_stage_cache_is_content_keyed_and_cleared_on_success_and_failure(self):
         f = fixture()
