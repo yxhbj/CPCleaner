@@ -342,6 +342,28 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("installation verified", stdout)
         self.assertEqual(os.listdir(target), [])
 
+    def test_windows_line_endings_in_complete_source_install_successfully(self):
+        source = os.path.dirname(self.script)
+        copied = os.path.join(self.temp, "windows-source")
+        os.mkdir(copied)
+        for name in ("Install-CPCleaner.sh", "Install-CPCleaner.py",
+                     "build.py", "core.py", "helper.py", "LICENSE", "README.md"):
+            data = helper.read_bytes(os.path.join(source, name))
+            with open(os.path.join(copied, name), "wb") as stream:
+                stream.write(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        self.script = os.path.join(copied, "Install-CPCleaner.sh")
+        target = os.path.join(self.temp, "from-windows")
+        code, stdout, stderr = self.install(target)
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("installation verified", stdout)
+        manifest = helper.load(os.path.join(target, "manifest.json"))
+        for name, digest in manifest["files"].items():
+            data = helper.read_bytes(os.path.join(target, name))
+            self.assertEqual(core.digest(data), digest)
+            if name.endswith(".Script"):
+                self.assertEqual(core.checksum(data), 0)
+                self.assertNotIn(b"\r", data[:data.rfind(b"/* ")])
+
 
 class RuntimeTests(unittest.TestCase):
     def test_stage_cache_is_content_keyed_and_cleared_on_success_and_failure(self):

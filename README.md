@@ -53,6 +53,15 @@
    在 Pinnacle 的 Scripting 窗口选择此路径，即可开始研究试用。
 
 安装程序不连接网络、不安装 Python、不访问或修改计划、不注册全局 HotScriptList。
+安装入口和 Python 源文件兼容 Windows CRLF 换行；生成的原生 `.Script` 仍必须按二进制保存和传输。
+若旧版在第 2 行显示 `set: unknown option`，请下载最新研究版；也可在旧版解压目录
+绕过 shell 入口，直接使用 Solaris 系统 Python：
+
+```sh
+/usr/bin/python -B build.py /home/ACCOUNT/CPCleaner /home/ACCOUNT/CPCleaner /usr/bin/python
+```
+
+将 `ACCOUNT` 替换为真实账户路径，安装目录必须尚不存在。不要对生成的 `.Script` 做换行转换。
 若系统 Python、终端或传输权限不可用，请由获授权的管理员协助，不要绕过现场限制。
 首次使用前阅读下方研究范围及许可；安装成功不等于临床验收。
 
@@ -207,8 +216,8 @@ Python 预览计算约 28.7 → 1.6 秒，授权检查及 guard 生成约 39.8 �
   No/Yes、原生曲线导入、读回、剂量失效、Verify 和无异常复查。
   这不代表当前独立仓库版本已完成同等原生验收。
 - 当前算法含正常动态闭合间隙误报修正；不要使用缺少此判定的早期原型。
-- 当前版本有 31 项算法/流程测试及 2 项普通账户安装测试；
-  Solaris Python 2.7.9 下全部 33 项通过，Windows Python 3 下通过 31 项并跳过 2 项 POSIX 安装测试，
+- 当前版本有 31 项算法/流程测试及 3 项普通账户安装测试（含 CRLF 源文件安装）；
+  Solaris Python 2.7.9 下全部 34 项通过，Windows Python 3 下通过 31 项并跳过 3 项 POSIX 安装测试，
   包含阶段缓存隔离、文件变化识别、共同闭合参考、移动范围遮挡、
   约束回退、任意 Trial 名确认及确认期间变化拒绝。
   后续版本的测试结果以对应测试命令及 CI 为准。
