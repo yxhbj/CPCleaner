@@ -333,6 +333,118 @@ def analyze(trial_bytes, machine_bytes):
     return analyze_parsed(trial_bytes, read(trial_bytes), [read(data) for data in machine_bytes])
 
 
+def curve_edit(trial_bytes, cp, values, bi, ci):
+    points = leaf_values(cp)
+    curve = one(cp, "MLCLeafPositions", "block")
+    body = trial_bytes[curve["start"] + 1:curve["end"] - 1]
+    start = points["start"] - curve["start"] - 1
+    end = points["end"] - curve["start"] - 1
+    edited = native(body[:start] + ("{\n" + ",".join("%.12g" % v for v in values)
+                                   + "\n}").encode("ascii") + body[end:])
+    insist(one(block(read(edited), "RawData"), "Points[]", "array")["values"] == values,
+           "curve serialization mismatch")
+    return {"beamIndex": bi, "segmentIndex": ci, "values": values,
+            "bytes": edited, "sha256": digest(edited)}
+
+
+def analyze_arc(trial_bytes, beam, segments, machine, bi, result):
+    insist(len(segments) >= 2, "Dynamic Arc requires at least two control points")
+    cps, original, geometry_values = [], [], []
+    for ci, segment in enumerate(segments):
+        insist(segment["key"] == "#" + str(ci) and segment["kind"] == "block",
+               "nonconsecutive arc control points")
+        cp = segment["children"]
+        cps.append(cp)
+        values = leaf_values(cp)["values"]
+        original.append(values)
+        fields = [number(cp, key) for key in ("Couch", "Collimator", "LeftJawPosition",
+                                              "RightJawPosition", "TopJawPosition", "BottomJawPosition")]
+        geometry_values.append(fields)
+        insist(all(abs(v) <= 100 for v in fields[2:]) and fields[2] + fields[3] > 0
+               and fields[4] + fields[5] > 0, "invalid arc jaw rectangle")
+        insist(0 <= number(cp, "Gantry") < 360, "invalid arc gantry angle")
+        insist(number(cp, "DeliveryTime") >= 0 and number(cp, "DoseRate") >= 0
+               and number(cp, "Weight") >= 0 and 0 <= number(cp, "PercentOfArc") <= 1,
+               "invalid arc delivery fields")
+        flag(cp, "WeightLocked")
+    insist(all(fields == geometry_values[0] for fields in geometry_values),
+           "Dynamic Arc requires fixed jaws, couch and collimator")
+    progress = [number(cp, "PercentOfArc") for cp in cps]
+    insist(progress[0] == 0 and progress[-1] == 1
+           and all(a < b for a, b in zip(progress, progress[1:])), "invalid arc control-point ordering")
+    insist(all(number(cp, "DeliveryTime") > 0 for cp in cps[:-1]),
+           "arc interval delivery time must be positive")
+    left, right, top, bottom = geometry_values[0][2:]
+    travel, strip = ((left, right), (top, bottom)) if machine["alignedX"] else ((top, bottom), (left, right))
+    for values in original:
+        validate_positions(values, machine, travel)
+    proposed = [values[:] for values in original]
+    findings = []
+    for li, leaf in enumerate(machine["leaves"]):
+        pairs = [values[2 * li:2 * li + 2] for values in original]
+        opened = [ci for ci, pair in enumerate(pairs) if not closed_opening(pair, machine)]
+        candidates = [ci for ci in opened if masked_opening(pairs[ci], machine, leaf, travel, strip)]
+        for ci in opened:
+            if ci not in candidates:
+                result["observations"].append({"beamIndex": bi, "segmentIndex": ci, "leafIndex": li,
+                                              "beamName": string(beam, "Name"), "before": pairs[ci],
+                                              "classification": "active-or-boundary"})
+        if not candidates:
+            continue
+        prefix = "Beam %d leaf pair %d: " % (bi + 1, li + 1)
+        if len(candidates) != len(opened):
+            result["blockers"].append(prefix + "opening enters the active/boundary region during the arc")
+            continue
+        references = [pair for pair in pairs if closed_opening(pair, machine)]
+        if references and any(pair != references[0] for pair in references):
+            result["blockers"].append(prefix + "already-closed control points have different positions")
+            continue
+        if references:
+            target = references[0][:]
+            strategy = "arc-closed-cps-consensus"
+        else:
+            common = [min(pair[bank] for pair in pairs) for bank in (0, 1)]
+            dynamic = dict(machine, minGap=max(machine["minGap"], machine["minDynamicGap"]))
+            try:
+                target = minimum_opening(common[0], common[1], dynamic, leaf)
+            except ValueError as error:
+                result["blockers"].append(prefix + str(error))
+                continue
+            strategy = "arc-common-aperture"
+        step = Decimal(str(machine["precision"]))
+        if any(Decimal(str(value)) % step != 0 for value in target):
+            result["blockers"].append(prefix + "arc closure is not quantized")
+            continue
+        if sum(Decimal(str(value)) for value in target) < Decimal(str(machine["minDynamicGap"])):
+            result["blockers"].append(prefix + "arc closure is below the dynamic minimum gap")
+            continue
+        if not closed_opening(target, machine):
+            result["blockers"].append(prefix + "quantized dynamic minimum is not a recognized closed gap")
+            continue
+        # A fixed jaw must mask the hull of every original and proposed position.
+        # The edited pair is constant over the entire arc: no new speed or acceleration.
+        swept = [max([pair[bank] for pair in pairs] + [target[bank]]) for bank in (0, 1)]
+        if not masked_opening(swept, machine, leaf, travel, strip):
+            result["blockers"].append(prefix + "full-arc swept aperture is not completely jaw-masked")
+            continue
+        for ci in opened:
+            proposed[ci][2 * li:2 * li + 2] = target
+            findings.append({"beamIndex": bi, "segmentIndex": ci, "leafIndex": li,
+                             "beamName": string(beam, "Name"), "before": pairs[ci], "after": target[:],
+                             "classification": masked_opening(swept, machine, leaf, travel, strip),
+                             "closureStrategy": strategy})
+        insist(all(values[2 * li:2 * li + 2] == target for values in proposed),
+               "arc cleanup must yield a constant leaf-pair trajectory")
+    for ci, values in enumerate(proposed):
+        try:
+            validate_positions(values, machine, travel)
+        except ValueError as error:
+            result["blockers"].append("Beam %d CP %d: %s" % (bi + 1, ci + 1, error))
+        if values != original[ci]:
+            result["curves"].append(curve_edit(trial_bytes, cps[ci], values, bi, ci))
+    result["changes"].extend(findings)
+
+
 def analyze_parsed(trial_bytes, trial, machines):
     beams = block(trial, "BeamList")
     insist(0 < len(beams) <= 64 and len(machines) == len(beams), "one machine snapshot per beam required")
@@ -341,8 +453,10 @@ def analyze_parsed(trial_bytes, trial, machines):
     for bi, entry in enumerate(beams):
         insist(entry["key"] == "Beam" and entry["kind"] == "block", "invalid beam list")
         beam = entry["children"]
-        insist(string(beam, "SetBeamType") == "Step & Shoot MLC" and flag(beam, "UseMLC")
-               and string(beam, "Modality") == "Photons", "only static photon Step & Shoot MLC supported")
+        technique = string(beam, "SetBeamType")
+        insist(technique in ("Step & Shoot MLC", "Dynamic Arc") and flag(beam, "UseMLC")
+               and string(beam, "Modality") == "Photons",
+               "only photon Step & Shoot MLC and fixed-jaw Dynamic Arc supported")
         machine = geometry(machines[bi])
         insist(string(beam, "MachineNameAndVersion") == machine["name"] + ": " + machine["version"],
                "machine name/version mismatch")
@@ -356,6 +470,9 @@ def analyze_parsed(trial_bytes, trial, machines):
         segment_values = [leaf_values(segment["children"])["values"] for segment in segments]
         insist(all(len(values) == 2 * len(machine["leaves"]) for values in segment_values),
                "leaf coordinate count mismatch")
+        if technique == "Dynamic Arc":
+            analyze_arc(trial_bytes, beam, segments, machine, bi, result)
+            continue
         static = None
         for ci, segment in enumerate(segments):
             insist(segment["key"] == "#" + str(ci) and segment["kind"] == "block", "nonconsecutive segments")
@@ -415,16 +532,7 @@ def analyze_parsed(trial_bytes, trial, machines):
                     validate_positions(values, machine, travel)
                 except ValueError as error:
                     result["blockers"].append("Beam %d Segment %d: %s" % (bi + 1, ci + 1, error))
-                curve = one(cp, "MLCLeafPositions", "block")
-                body = trial_bytes[curve["start"] + 1:curve["end"] - 1]
-                start = points["start"] - curve["start"] - 1
-                end = points["end"] - curve["start"] - 1
-                edited = native(body[:start] + ("{\n" + ",".join("%.12g" % v for v in values)
-                                               + "\n}").encode("ascii") + body[end:])
-                insist(one(block(read(edited), "RawData"), "Points[]", "array")["values"] == values,
-                       "curve serialization mismatch")
-                result["curves"].append({"beamIndex": bi, "segmentIndex": ci,
-                                         "values": values, "bytes": edited, "sha256": digest(edited)})
+                result["curves"].append(curve_edit(trial_bytes, cp, values, bi, ci))
                 result["changes"].extend(changed)
     return result
 

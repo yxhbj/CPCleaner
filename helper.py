@@ -362,7 +362,8 @@ def guard(directory):
         bp = "TrialList.Current.BeamList." + index(bi) + "."
         for field in ("Name", "MachineNameAndVersion", "MachineEnergyName", "Modality"):
             string(bp + field, core.string(beam, field))
-        string(bp + "BeamType", "Step & Shoot MLC")
+        technique = core.string(beam, "SetBeamType")
+        string(bp + "BeamType", technique)
         for field, value in (("UseMLC", 1), ("BlocksAreLocked", 0), ("CPManager.ComputeDoseFromODM", 0)):
             numeric(bp + field, value)
         cps = core.block(core.manager(beam), "ControlPointList")
@@ -373,6 +374,9 @@ def guard(directory):
             for key in ("Gantry", "Couch", "Collimator", "LeftJawPosition", "RightJawPosition",
                         "TopJawPosition", "BottomJawPosition", "Weight", "WeightLocked"):
                 numeric(prefix + key, core.number(cp, key))
+            if technique == "Dynamic Arc":
+                for key in ("DeliveryTime", "DoseRate", "PercentOfArc"):
+                    numeric(prefix + key, core.number(cp, key))
             values = core.leaf_values(cp)["values"]
             numeric(prefix + "MLCLeafPositions.NumberOfPoints", len(values) // 2)
             for i, value in enumerate(values):
